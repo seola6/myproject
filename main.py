@@ -1,8 +1,4 @@
-# main.py
-
-import json
 import requests
-import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
@@ -11,7 +7,7 @@ import plotly.express as px
 # 페이지 설정
 # --------------------------------------------------
 st.set_page_config(
-    page_title="전국 시군구 아이 비율 지도",
+    page_title="대한민국 아이 비율 지도",
     layout="wide"
 )
 
@@ -20,48 +16,82 @@ st.set_page_config(
 # --------------------------------------------------
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@400;600;700&display=swap');
 
-html, body, [class*="css"] {
-    font-family: 'Noto Serif KR', serif;
+@import url('https://fonts.googleapis.com/css2?family=Jua&display=swap');
+
+html, body, [class*="css"]{
+    font-family:'Jua',sans-serif;
 }
 
-.stApp {
-    background: linear-gradient(
+/* 배경 */
+.stApp{
+    background:
+    radial-gradient(circle at 15% 15%, #fff8cf 0%, transparent 25%),
+    radial-gradient(circle at 85% 20%, #fff3bc 0%, transparent 25%),
+    radial-gradient(circle at 70% 80%, #fff8d6 0%, transparent 20%),
+    linear-gradient(
         180deg,
-        #fffdf2 0%,
-        #fff9dc 50%,
-        #fff4b8 100%
+        #fffef7 0%,
+        #fff9db 50%,
+        #fff2ae 100%
     );
 }
 
-h1,h2,h3 {
-    color:#7b5d00;
+/* 제목 */
+h1{
+    color:#d38a00;
+    text-align:center;
 }
 
+h2,h3{
+    color:#a96f00;
+}
+
+/* 떠다니는 아기들 */
 .baby{
     position:fixed;
-    opacity:0.08;
-    font-size:42px;
+    font-size:55px;
+    opacity:0.15;
     z-index:0;
+    animation: floatBaby 12s ease-in-out infinite;
 }
 
-.b1{top:10%;left:2%;}
-.b2{top:20%;right:4%;}
-.b3{bottom:15%;left:4%;}
-.b4{bottom:20%;right:8%;}
+.b1{left:2%;top:8%;}
+.b2{right:3%;top:18%;animation-delay:2s;}
+.b3{left:4%;bottom:18%;animation-delay:4s;}
+.b4{right:8%;bottom:10%;animation-delay:1s;}
+.b5{left:45%;top:5%;animation-delay:6s;}
+.b6{left:70%;top:60%;animation-delay:3s;}
+
+@keyframes floatBaby{
+    0%{transform:translateX(0px);}
+    50%{transform:translateX(40px);}
+    100%{transform:translateX(0px);}
+}
+
+[data-testid="stDataFrame"]{
+    border-radius:20px;
+}
+
 </style>
 
 <div class="baby b1">👶</div>
 <div class="baby b2">🍼</div>
-<div class="baby b3">🧸</div>
-<div class="baby b4">👶</div>
+<div class="baby b3">👶</div>
+<div class="baby b4">🧸</div>
+<div class="baby b5">👼</div>
+<div class="baby b6">🐣</div>
+
 """, unsafe_allow_html=True)
 
-st.title("👶 전국 시군구 아이 비율 지도")
-st.caption("0~14세 인구 비율 기준")
+st.title("👶 대한민국 아이 비율 지도 🧸")
+st.caption("시군구별 0~14세 인구 비율")
 
+# --------------------------------------------------
+# 데이터 주소
+# --------------------------------------------------
 POP_URL = "https://raw.githubusercontent.com/greatsong/modudata/main/data/population_yearly.csv.gz"
+
 GEO_URL = "https://raw.githubusercontent.com/greatsong/modudata/main/data/boundaries/sigungu_kr.geojson"
 
 # --------------------------------------------------
@@ -82,7 +112,6 @@ def load_population():
 
     return df, latest_year
 
-
 # --------------------------------------------------
 # GeoJSON
 # --------------------------------------------------
@@ -92,16 +121,33 @@ def load_geojson():
     response = requests.get(GEO_URL, timeout=30)
     response.raise_for_status()
 
-    geojson = response.json()
+    return response.json()
 
-    return geojson
+# --------------------------------------------------
+# 시군구 정보
+# --------------------------------------------------
+@st.cache_data
+def region_info(geojson):
 
+    rows = []
+
+    for feature in geojson["features"]:
+
+        p = feature["properties"]
+
+        rows.append({
+            "코드": str(p["코드"]).zfill(5),
+            "시도": p["시도"],
+            "시군구": p["시군구"]
+        })
+
+    return pd.DataFrame(rows)
 
 # --------------------------------------------------
 # 아이 비율 계산
 # --------------------------------------------------
 @st.cache_data
-def make_child_ratio(df):
+def child_ratio(df):
 
     df["시군구코드"] = df["코드"].str[:5]
 
@@ -115,57 +161,35 @@ def make_child_ratio(df):
         for i in range(15)
     ]
 
-    sigungu = (
+    agg = (
         df.groupby("시군구코드")[total_cols]
         .sum()
         .reset_index()
     )
 
-    sigungu["전체인구"] = sigungu[total_cols].sum(axis=1)
-    sigungu["아이인구"] = sigungu[child_cols].sum(axis=1)
+    agg["전체인구"] = agg[total_cols].sum(axis=1)
+    agg["아이인구"] = agg[child_cols].sum(axis=1)
 
-    sigungu["아이비율"] = (
-        sigungu["아이인구"]
-        / sigungu["전체인구"]
+    agg["아이비율"] = (
+        agg["아이인구"]
+        / agg["전체인구"]
         * 100
     )
 
-    return sigungu
-
-
-# --------------------------------------------------
-# 시군구 이름 추출
-# --------------------------------------------------
-@st.cache_data
-def make_region_info(geojson):
-
-    rows = []
-
-    for feature in geojson["features"]:
-
-        prop = feature["properties"]
-
-        rows.append({
-            "코드": str(prop["코드"]).zfill(5),
-            "시군구": prop["시군구"],
-            "시도": prop["시도"]
-        })
-
-    return pd.DataFrame(rows)
-
+    return agg[["시군구코드", "아이비율"]]
 
 # --------------------------------------------------
 # 데이터 준비
 # --------------------------------------------------
-with st.spinner("데이터 불러오는 중..."):
+with st.spinner("아이들을 찾는 중... 👶"):
 
     pop_df, latest_year = load_population()
 
     geojson = load_geojson()
 
-    region_df = make_region_info(geojson)
+    region_df = region_info(geojson)
 
-    ratio_df = make_child_ratio(pop_df)
+    ratio_df = child_ratio(pop_df)
 
     data = region_df.merge(
         ratio_df,
@@ -175,7 +199,7 @@ with st.spinner("데이터 불러오는 중..."):
     )
 
 # --------------------------------------------------
-# 단계 구분
+# 구간 설정
 # --------------------------------------------------
 bins = [-999, 19, 23, 28, 38, 999]
 
@@ -195,20 +219,20 @@ data["구간"] = pd.cut(
 )
 
 color_map = {
-    "19% 미만": "#fff7bc",
-    "19~23%": "#fee391",
-    "23~28%": "#fec44f",
-    "28~38%": "#fe9929",
-    "38% 이상": "#d95f0e"
+    "19% 미만":"#fff7bc",
+    "19~23%":"#fee391",
+    "23~28%":"#fec44f",
+    "28~38%":"#fe9929",
+    "38% 이상":"#d95f0e"
 }
 
 # --------------------------------------------------
 # 지도
 # --------------------------------------------------
-st.subheader(f"{latest_year}년 기준")
+st.subheader(f"📅 {latest_year}년 기준")
 
 fig = px.choropleth(
-    data_frame=data,
+    data,
     geojson=geojson,
     locations="코드",
     featureidkey="properties.코드",
@@ -242,7 +266,7 @@ fig.update_layout(
         t=0,
         b=0
     ),
-    legend_title_text="아이 비율 구간",
+    legend_title_text="아이 비율",
     paper_bgcolor="rgba(0,0,0,0)",
     plot_bgcolor="rgba(0,0,0,0)"
 )
@@ -253,15 +277,11 @@ st.plotly_chart(
 )
 
 # --------------------------------------------------
-# 순위 표
+# 순위
 # --------------------------------------------------
 rank_df = (
     data[
-        [
-            "시도",
-            "시군구",
-            "아이비율"
-        ]
+        ["시도", "시군구", "아이비율"]
     ]
     .sort_values(
         "아이비율",
@@ -287,24 +307,24 @@ bottom10 = bottom10[
     ["시도", "시군구", "아이 비율(%)"]
 ]
 
-st.markdown("---")
+st.divider()
 
 col1, col2 = st.columns(2)
 
 with col1:
-    st.subheader("👶 아이 비율 높은 지역 TOP 10")
+    st.subheader("👑 아이 비율 높은 지역 TOP 10")
     st.dataframe(
         top10,
-        use_container_width=True,
-        hide_index=True
+        hide_index=True,
+        use_container_width=True
     )
 
 with col2:
     st.subheader("📉 아이 비율 낮은 지역 TOP 10")
     st.dataframe(
         bottom10,
-        use_container_width=True,
-        hide_index=True
+        hide_index=True,
+        use_container_width=True
     )
 
 st.caption(
