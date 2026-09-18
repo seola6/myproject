@@ -1,102 +1,259 @@
-import re
-import requests
+import json
+import numpy as np
 import pandas as pd
+import geopandas as gpd
 import streamlit as st
 import plotly.express as px
 
-st.set_page_config(page_title="전국 고령화 지도", layout="wide")
-st.title("🗺️ 전국 고령화 지도")
-st.caption("시군구별 65세 이상 인구 비율 (행정안전부 주민등록 인구)")
+# --------------------------------------------------
+# 페이지 설정
+# --------------------------------------------------
+st.set_page_config(
+    page_title="전국 시군구 아이 비율 지도",
+    layout="wide"
+)
+
+# 노란 분위기 + 고급스러운 느낌
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@400;600;700&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'Noto Serif KR', serif;
+}
+
+.stApp {
+    background: linear-gradient(
+        180deg,
+        #fffdf2 0%,
+        #fff8d6 50%,
+        #fff3b0 100%
+    );
+}
+
+h1, h2, h3 {
+    color: #7a5c00;
+}
+
+.block-container {
+    padding-top: 2rem;
+}
+
+.baby {
+    position: fixed;
+    font-size: 32px;
+    opacity: 0.12;
+    z-index: 0;
+}
+
+.b1 { top: 8%; left: 3%; }
+.b2 { top: 20%; right: 5%; }
+.b3 { bottom: 15%; left: 8%; }
+.b4 { bottom: 25%; right: 10%; }
+</style>
+
+<div class="baby b1">👶</div>
+<div class="baby b2">🍼</div>
+<div class="baby b3">👶</div>
+<div class="baby b4">🧸</div>
+""", unsafe_allow_html=True)
+
+st.title("👶 전국 시군구 아이 비율 지도")
+st.caption("0~14세 인구 비율 기준")
 
 POP_URL = "https://raw.githubusercontent.com/greatsong/modudata/main/data/population_yearly.csv.gz"
 GEO_URL = "https://raw.githubusercontent.com/greatsong/modudata/main/data/boundaries/sigungu_kr.geojson"
 
-@st.cache_data(show_spinner="인구 데이터를 불러오는 중입니다...")
+
+# --------------------------------------------------
+# 인구 데이터
+# --------------------------------------------------
+@st.cache_data
 def load_population():
-    # '코드' 열은 앞자리 0이 사라지지 않게 글자로 읽습니다
-    return pd.read_csv(POP_URL, dtype={"코드": str})
+    df = pd.read_csv(
+        POP_URL,
+        compression="gzip",
+        dtype={"코드": str}
+    )
 
-@st.cache_data(show_spinner="지도 경계를 불러오는 중입니다...")
-def load_geojson():
-    return requests.get(GEO_URL, timeout=30).json()
+    latest_year = df["연도"].max()
+    df = df[df["연도"] == latest_year].copy()
 
-df = load_population()
-geojson = load_geojson()
+    return df, latest_year
 
-# 1. 가장 최신 연도만 사용
-latest_year = int(df["연도"].max())
-df = df[df["연도"] == latest_year].copy()
 
-# 2. '계_'로 시작하는 나이 열만 (남_·여_ 열까지 더하면 두 배가 됩니다)
-total_cols = [c for c in df.columns if c.startswith("계_")]
+# --------------------------------------------------
+# 지도 경계
+# --------------------------------------------------
+@st.cache_data
+def load_geo():
+    gdf = gpd.read_file(GEO_URL)
+    gdf["코드"] = gdf["코드"].astype(str).str.zfill(5)
+    return gdf
 
-def age_of(col):
-    m = re.match(r"계_(\d+)세", col)
-    return int(m.group(1)) if m else None
 
-# 3. 그중 65세 이상 열만 ('계_65세' ~ '계_100세 이상')
-elderly_cols = [c for c in total_cols if age_of(c) is not None and age_of(c) >= 65]
+# --------------------------------------------------
+# 시군구별 아이 비율 계산
+# --------------------------------------------------
+@st.cache_data
+def make_child_ratio(df):
+    # 시군구 코드
+    df["시군구코드"] = df["코드"].str[:5]
 
-# 4. 동 단위로 전체 인구·고령 인구 계산
-df["전체인구"] = df[total_cols].sum(axis=1)
-df["고령인구"] = df[elderly_cols].sum(axis=1)
+    # 전체 인구 열
+    total_cols = [
+        c for c in df.columns
+        if c.startswith("계_")
+    ]
 
-# 5. '코드' 앞 5자리 = 시군구 코드 → 시군구별로 묶어 비율 계산
-df["시군구코드"] = df["코드"].str[:5]
-grouped = df.groupby("시군구코드")[["전체인구", "고령인구"]].sum().reset_index()
-grouped["고령화율"] = (grouped["고령인구"] / grouped["전체인구"] * 100).round(2)
+    # 0~14세 인구 열
+    child_cols = [f"계_{i}세" for i in range(15)]
 
-# 경계 파일에서 코드 → 시군구·시도 이름 짝 만들기
-names = pd.DataFrame([
-    {
-        "시군구코드": str(f["properties"]["코드"]),
-        "시군구": f["properties"]["시군구"],
-        "시도": f["properties"]["시도"],
-    }
-    for f in geojson["features"]
-])
-merged = grouped.merge(names, on="시군구코드", how="left")
+    agg = (
+        df.groupby("시군구코드")[total_cols]
+        .sum()
+        .reset_index()
+    )
 
-# 6. 5단계 색 구간 (전국 시군구를 다섯 덩어리로 나눈 실제 경계값)
-BINS = [0, 19, 23, 28, 38, 100]
-LABELS = ["19% 미만", "19~23%", "23~28%", "28~38%", "38% 이상"]
-COLORS = {
-    "19% 미만": "#fee6ce",
-    "19~23%": "#fdc086",
-    "23~28%": "#f79646",
-    "28~38%": "#e8590c",
-    "38% 이상": "#a63603",
+    agg["전체인구"] = agg[total_cols].sum(axis=1)
+    agg["아이인구"] = agg[child_cols].sum(axis=1)
+
+    agg["아이비율"] = (
+        agg["아이인구"] /
+        agg["전체인구"] * 100
+    )
+
+    return agg[["시군구코드", "아이비율"]]
+
+
+# --------------------------------------------------
+# 데이터 준비
+# --------------------------------------------------
+with st.spinner("데이터 불러오는 중..."):
+    pop_df, latest_year = load_population()
+    geo = load_geo()
+    ratio = make_child_ratio(pop_df)
+
+data = geo.merge(
+    ratio,
+    left_on="코드",
+    right_on="시군구코드",
+    how="left"
+)
+
+# --------------------------------------------------
+# 단계 구분
+# --------------------------------------------------
+bins = [-999, 19, 23, 28, 38, 999]
+labels = [
+    "19% 미만",
+    "19~23%",
+    "23~28%",
+    "28~38%",
+    "38% 이상"
+]
+
+data["구간"] = pd.cut(
+    data["아이비율"],
+    bins=bins,
+    labels=labels,
+    include_lowest=True
+)
+
+# 옅은 노랑 → 진한 주황
+color_map = {
+    "19% 미만": "#fff7bc",
+    "19~23%": "#fee391",
+    "23~28%": "#fec44f",
+    "28~38%": "#fe9929",
+    "38% 이상": "#d95f0e"
 }
-merged["단계"] = pd.cut(merged["고령화율"], bins=BINS, labels=LABELS, right=False)
 
-# 7. 단계구분도 그리기 (배경 지도 타일 없이 경계만)
+# --------------------------------------------------
+# 지도
+# --------------------------------------------------
+st.subheader(f"{latest_year}년 기준")
+
 fig = px.choropleth(
-    merged,
-    geojson=geojson,
-    locations="시군구코드",
+    data,
+    geojson=json.loads(data.to_json()),
+    locations="코드",
     featureidkey="properties.코드",
-    color="단계",
-    category_orders={"단계": LABELS},
-    color_discrete_map=COLORS,
-    hover_name="시군구",
-    hover_data={"고령화율": True, "시도": True, "시군구코드": False, "단계": False},
-    labels={"고령화율": "65세 이상 비율(%)"},
+    color="구간",
+    color_discrete_map=color_map,
+    category_orders={"구간": labels},
+    custom_data=[
+        "시군구",
+        "시도",
+        "아이비율"
+    ]
 )
-fig.update_geos(fitbounds="locations", visible=False)
+
+fig.update_traces(
+    hovertemplate=
+    "<b>%{customdata[0]}</b><br>"
+    "시도: %{customdata[1]}<br>"
+    "아이 비율: %{customdata[2]:.2f}%"
+    "<extra></extra>"
+)
+
+fig.update_geos(
+    fitbounds="locations",
+    visible=False
+)
+
 fig.update_layout(
-    margin=dict(l=0, r=0, t=10, b=0),
-    height=700,
-    legend_title_text=f"65세 이상 비율 ({latest_year}년)",
+    height=800,
+    margin=dict(l=0, r=0, t=0, b=0),
+    paper_bgcolor="rgba(0,0,0,0)",
+    plot_bgcolor="rgba(0,0,0,0)",
+    legend_title_text="아이 비율 구간"
 )
 
-st.plotly_chart(fig, width="stretch")
+st.plotly_chart(
+    fig,
+    use_container_width=True
+)
 
-# 8. 지도 아래 순위 표 두 개
-c1, c2 = st.columns(2)
-cols = ["시도", "시군구", "고령화율"]
-with c1:
-    st.subheader("🔴 고령화율 높은 곳 10")
-    st.dataframe(merged.nlargest(10, "고령화율")[cols].reset_index(drop=True))
-with c2:
-    st.subheader("🟢 고령화율 낮은 곳 10")
-    st.dataframe(merged.nsmallest(10, "고령화율")[cols].reset_index(drop=True))
+# --------------------------------------------------
+# 상위 / 하위 10개
+# --------------------------------------------------
+rank_df = (
+    data[["시도", "시군구", "아이비율"]]
+    .sort_values("아이비율", ascending=False)
+    .reset_index(drop=True)
+)
+
+top10 = rank_df.head(10).copy()
+bottom10 = rank_df.tail(10).sort_values(
+    "아이비율",
+    ascending=True
+)
+
+top10["아이 비율(%)"] = top10["아이비율"].round(2)
+bottom10["아이 비율(%)"] = bottom10["아이비율"].round(2)
+
+top10 = top10[["시도", "시군구", "아이 비율(%)"]]
+bottom10 = bottom10[["시도", "시군구", "아이 비율(%)"]]
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.subheader("👶 아이 비율 높은 지역 TOP 10")
+    st.dataframe(
+        top10,
+        use_container_width=True,
+        hide_index=True
+    )
+
+with col2:
+    st.subheader("👴 아이 비율 낮은 지역 TOP 10")
+    st.dataframe(
+        bottom10,
+        use_container_width=True,
+        hide_index=True
+    )
+
+st.caption(
+    "아이 비율 = 0~14세 인구 ÷ 전체 인구 × 100"
+)
